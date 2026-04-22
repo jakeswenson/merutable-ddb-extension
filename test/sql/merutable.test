@@ -1,0 +1,27 @@
+# name: test/sql/merutable.test
+# description: test merutable extension
+# group: [sql]
+
+require merutable
+
+# Write a table
+statement ok
+COPY (SELECT 1::BIGINT AS id, 'alice'::VARCHAR AS name)
+TO '/tmp/merutable_test_db' (FORMAT merutable, TABLE_NAME 'users', PRIMARY_KEY 'id');
+
+# Scan it back
+query II
+SELECT id, name FROM merutable_scan('/tmp/merutable_test_db') ORDER BY id;
+----
+1	alice
+
+# Point lookup — hit
+query II
+SELECT id, name FROM merutable_get('/tmp/merutable_test_db', 1::BIGINT);
+----
+1	alice
+
+# Point lookup — miss returns empty
+query II
+SELECT id, name FROM merutable_get('/tmp/merutable_test_db', 999::BIGINT);
+----
