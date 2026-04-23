@@ -25,3 +25,53 @@ SELECT id, name FROM merutable_get('/tmp/merutable_test_db', 1::BIGINT);
 query II
 SELECT id, name FROM merutable_get('/tmp/merutable_test_db', 999::BIGINT);
 ----
+
+# ── StorageExtension: ATTACH / CREATE TABLE / INSERT INTO / SELECT ─────────────
+
+# Attach a new database
+statement ok
+ATTACH '/tmp/meru_attach_test' AS mydb (TYPE merutable);
+
+# Create a table (opens the merutable database with this schema)
+statement ok
+CREATE TABLE mydb.users (id BIGINT PRIMARY KEY, name VARCHAR);
+
+# Insert rows
+statement ok
+INSERT INTO mydb.users VALUES (1, 'alice');
+
+statement ok
+INSERT INTO mydb.users VALUES (2, 'bob');
+
+# Read back via catalog SELECT
+query II
+SELECT id, name FROM mydb.users ORDER BY id;
+----
+1	alice
+2	bob
+
+# Legacy merutable_scan also sees the data (confirms flush + iceberg export)
+query II
+SELECT id, name FROM merutable_scan('/tmp/meru_attach_test') ORDER BY id;
+----
+1	alice
+2	bob
+
+# Point lookup still works
+query II
+SELECT id, name FROM merutable_get('/tmp/meru_attach_test', 1::BIGINT);
+----
+1	alice
+
+# COPY path still works (adds row 3)
+statement ok
+COPY (SELECT 3::BIGINT AS id, 'carol'::VARCHAR AS name)
+TO '/tmp/meru_attach_test' (FORMAT merutable, TABLE_NAME 'users', PRIMARY_KEY 'id');
+
+# After COPY, catalog SELECT sees all three rows
+query II
+SELECT id, name FROM mydb.users ORDER BY id;
+----
+1	alice
+2	bob
+3	carol

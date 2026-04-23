@@ -53,15 +53,12 @@ struct MerutableScanState : public GlobalTableFunctionState {
 	bool done = false;
 };
 
-// ── Bind ──────────────────────────────────────────────────────────────────────
+// ── Bind (core logic) ────────────────────────────────────────────────────────
 
-static unique_ptr<FunctionData> MerutableScanBind(ClientContext &context, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<string> &names) {
-	if (input.inputs.empty() || input.inputs[0].IsNull()) {
-		throw BinderException("merutable_scan requires a non-null path argument");
-	}
-	std::string db_path = input.inputs[0].GetValue<string>();
-
+static unique_ptr<FunctionData> BindFromPath(ClientContext &context,
+                                              const std::string &db_path,
+                                              vector<LogicalType> &return_types,
+                                              vector<string> &names) {
 	// Read manifest via Rust — handles both JSON and protobuf formats
 	MeruManifestInfo *raw_info = nullptr;
 	meru_checked([&](char **e) {
@@ -123,6 +120,25 @@ static unique_ptr<FunctionData> MerutableScanBind(ClientContext &context, TableF
 
 	bind_data->dedup_sql = sql.str();
 	return std::move(bind_data);
+}
+
+// ── Bind (table function entry point) ────────────────────────────────────────
+
+static unique_ptr<FunctionData> MerutableScanBind(ClientContext &context, TableFunctionBindInput &input,
+                                                   vector<LogicalType> &return_types, vector<string> &names) {
+	if (input.inputs.empty() || input.inputs[0].IsNull()) {
+		throw BinderException("merutable_scan requires a non-null path argument");
+	}
+	return BindFromPath(context, input.inputs[0].GetValue<string>(), return_types, names);
+}
+
+// ── BindWithPath (public static, called from MerutableTableEntry) ────────────
+
+unique_ptr<FunctionData> MerutableScanFunction::BindWithPath(ClientContext &context,
+                                                              const std::string &db_path,
+                                                              vector<LogicalType> &return_types,
+                                                              vector<string> &names) {
+	return BindFromPath(context, db_path, return_types, names);
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

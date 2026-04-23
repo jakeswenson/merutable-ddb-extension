@@ -53,6 +53,7 @@ set(EXTENSION_SOURCES
     src/merutable_scan.cpp
     src/merutable_get.cpp
     src/merutable_copy.cpp
+    src/merutable_storage.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

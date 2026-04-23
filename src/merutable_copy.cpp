@@ -10,22 +10,6 @@
 
 namespace duckdb {
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-static MeruColumnType DuckTypeToMeru(const LogicalType &lt) {
-	switch (lt.id()) {
-	case LogicalTypeId::BIGINT:
-	case LogicalTypeId::HUGEINT:    return MeruColumnType_Int64;
-	case LogicalTypeId::INTEGER:
-	case LogicalTypeId::SMALLINT:
-	case LogicalTypeId::TINYINT:    return MeruColumnType_Int32;
-	case LogicalTypeId::BOOLEAN:    return MeruColumnType_Boolean;
-	case LogicalTypeId::FLOAT:      return MeruColumnType_Float;
-	case LogicalTypeId::DOUBLE:     return MeruColumnType_Double;
-	default:                        return MeruColumnType_ByteArray;
-	}
-}
-
 // ── Bind data ─────────────────────────────────────────────────────────────────
 
 struct MerutableWriteBindData : public TableFunctionData {
@@ -50,19 +34,6 @@ struct MerutableWriteGlobalState : public GlobalFunctionData {
 			meru_free_string(err);
 			db = nullptr;
 		}
-	}
-};
-
-// ── Local state (per-thread batch buffer) ─────────────────────────────────────
-
-struct MerutableWriteLocalState : public LocalFunctionData {
-	std::vector<MeruRow> rows;
-	// Each row's field arrays are heap allocated; track them for cleanup
-	std::vector<std::vector<MeruValue>> field_arrays;
-
-	void Clear() {
-		rows.clear();
-		field_arrays.clear();
 	}
 };
 
@@ -188,72 +159,13 @@ static unique_ptr<GlobalFunctionData> MerutableInitGlobal(ClientContext &context
 	return std::move(gstate);
 }
 
-// ── Initialize local ──────────────────────────────────────────────────────────
-
-static unique_ptr<LocalFunctionData> MerutableInitLocal(ExecutionContext &context, FunctionData &) {
-	return make_uniq<MerutableWriteLocalState>();
-}
-
 // ── Sink (called per DataChunk) ───────────────────────────────────────────────
 
 static void MerutableSink(ExecutionContext &context, FunctionData &bind_data_in,
                            GlobalFunctionData &gstate_in, LocalFunctionData &lstate_in, DataChunk &input) {
 	auto &bind_data = bind_data_in.Cast<MerutableWriteBindData>();
 	auto &gstate    = gstate_in.Cast<MerutableWriteGlobalState>();
-	auto &lstate    = lstate_in.Cast<MerutableWriteLocalState>();
-
-	input.Flatten();
-	idx_t n_cols = bind_data.column_names.size();
-	idx_t n_rows = input.size();
-
-	lstate.rows.resize(n_rows);
-	lstate.field_arrays.resize(n_rows);
-
-	for (idx_t row = 0; row < n_rows; row++) {
-		lstate.field_arrays[row].resize(n_cols);
-
-		for (idx_t col = 0; col < n_cols; col++) {
-			MeruValue &mv = lstate.field_arrays[row][col];
-			memset(&mv, 0, sizeof(mv));
-			mv.tag = DuckTypeToMeru(bind_data.column_types[col]);
-
-			auto &vec = input.data[col];
-			if (FlatVector::IsNull(vec, row)) {
-				mv.is_null = 1;
-				continue;
-			}
-
-			switch (bind_data.column_types[col].id()) {
-			case LogicalTypeId::BIGINT:
-				mv.inner.v_int64 = FlatVector::GetData<int64_t>(vec)[row]; break;
-			case LogicalTypeId::INTEGER:
-				mv.inner.v_int32 = FlatVector::GetData<int32_t>(vec)[row]; break;
-			case LogicalTypeId::BOOLEAN:
-				mv.inner.v_bool = FlatVector::GetData<bool>(vec)[row] ? 1 : 0; break;
-			case LogicalTypeId::FLOAT:
-				mv.inner.v_float = FlatVector::GetData<float>(vec)[row]; break;
-			case LogicalTypeId::DOUBLE:
-				mv.inner.v_double = FlatVector::GetData<double>(vec)[row]; break;
-			default: {
-				// VARCHAR / BLOB / other → ByteArray
-				auto s = FlatVector::GetData<string_t>(vec)[row];
-				// Bytes will be copied by Rust; pointer valid for duration of put_batch call
-				mv.inner.v_bytes.data = (const uint8_t *)s.GetDataUnsafe();
-				mv.inner.v_bytes.len  = s.GetSize();
-				break;
-			}
-			}
-		}
-
-		lstate.rows[row].fields      = lstate.field_arrays[row].data();
-		lstate.rows[row].field_count = n_cols;
-	}
-
-	meru_checked([&](char **e) {
-		return meru_put_batch(gstate.db, lstate.rows.data(), (uintptr_t)n_rows, nullptr, e);
-	});
-
-	lstate.Clear();
+	WriteRows(gstate.db, input, bind_data.column_types);
 }
 
 // ── Combine (merge local → global, no-op since we write directly) ─────────────
@@ -290,7 +202,6 @@ CopyFunction MerutableCopyFunction::GetCopyFunction() {
 	cf.copy_options           = MerutableListCopyOptions;
 	cf.copy_to_bind           = MerutableWriteBind;
 	cf.copy_to_initialize_global = MerutableInitGlobal;
-	cf.copy_to_initialize_local  = MerutableInitLocal;
 	cf.copy_to_sink           = MerutableSink;
 	cf.copy_to_combine        = MerutableCombine;
 	cf.copy_to_finalize       = MerutableFinalize;
